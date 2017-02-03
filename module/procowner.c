@@ -11,6 +11,7 @@ int (*xlate)(const char *name, struct proc_dir_entry **ret, const char **residua
 struct proc_dir_entry* (*subdir_find)(struct proc_dir_entry *dir, const char *name, unsigned int len);
 void* subdir_lock;
 const char *(*syms_lookup)(unsigned long addr, unsigned long *symbolsize, unsigned long *offset, char **modname, char *namebuf);
+int (*symbol_name)(unsigned long addr, char *symname);
 
  struct proc_dir_entry {
         unsigned int low_ino;
@@ -59,6 +60,8 @@ static void get_owner(const char* fname) {
         printk(KERN_INFO MOD "Name: %s, proc fops: %p\n", de->name, de->proc_fops);
         tmpstr = syms_lookup((size_t)(de->proc_fops), &symbolsize, &offset, &modname, namebuf);
         printk(KERN_INFO MOD "Modname: %s\n", modname);
+        symbol_name((size_t)(de->proc_fops), namebuf);
+        printk(KERN_INFO MOD "Symbol: %s\n", namebuf);
     }
     spin_unlock(subdir_lock);
 
@@ -68,7 +71,7 @@ static void get_owner(const char* fname) {
 // ----------------------------------------------------------------------------------------------------------
 static int proc_read(struct seq_file *m, void *v) {
     seq_printf(m, "test\n");
-    get_owner("uptime");
+    get_owner("kallsyms");
 
     return 0;
 }
@@ -110,6 +113,11 @@ static int __init procowner_init(void)
         syms_lookup = kallsyms_lookup_name("kallsyms_lookup");
         if(!syms_lookup) {
            printk(KERN_INFO MOD "kallsyms_lookup not found!\n");
+           return -ENODEV;
+        }
+        symbol_name = kallsyms_lookup_name("lookup_symbol_name");
+        if(!symbol_name) {
+           printk(KERN_INFO MOD "lookup_symbol_name not found!\n");
            return -ENODEV;
         }
         
