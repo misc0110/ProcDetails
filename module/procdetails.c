@@ -5,26 +5,15 @@
 #include <linux/kallsyms.h>
 #include <linux/rwlock.h>
 #include <asm/uaccess.h>
+#include "procdetails.h"
 
-#define MOD "[proc-details]: "
-
-static struct {
-    char filename[256];
-    struct proc_dir_entry *dir_entry;
-    char modname[128];
-    char fops[128];
-    char fops_open[128];
-    char fops_release[128];
-    char fops_read[128];
-    char fops_write[128];
-    char fops_llseek[128];
-} proc_details;
-
-static int (*xlate)(const char *name, struct proc_dir_entry **ret, const char **residual);
-static struct proc_dir_entry* (*subdir_find)(struct proc_dir_entry *dir, const char *name, unsigned int len);
+static char buf[BUF];
+static struct _proc_details_ proc_details;
 static void* subdir_lock;
-static const char *(*syms_lookup)(unsigned long addr, unsigned long *symbolsize, unsigned long *offset, char **modname, char *namebuf);
-static int (*symbol_name)(unsigned long addr, char *symname);
+static subdir_find_t subdir_find = NULL;
+static xlate_t xlate = NULL;
+static syms_lookup_t syms_lookup = NULL;
+static symbol_name_t symbol_name = NULL;
 
 static void get_details(void);
 
@@ -43,42 +32,41 @@ struct proc_dir_entry {
     struct rb_root subdir;
     struct rb_node subdir_node;
     void *data;
-    atomic_t count;         /* use count */
-    atomic_t in_use;        /* number of callers into module in progress; */
-                    /* negative -> it's going away RSN */
+    atomic_t count;
+    atomic_t in_use;
     struct completion *pde_unload_completion;
-    struct list_head pde_openers;   /* who did ->open, but not ->release */
-    spinlock_t pde_unload_lock; /* proc_fops checks and pde_users bumps */
+    struct list_head pde_openers;
+    spinlock_t pde_unload_lock;
     u8 namelen;
     char name[];
 };
 
 // ----------------------------------------------------------------------------------------------------------
-#define BUF 1024
-#define SHOW_FUNCTION(fnc) if(proc_details.fops_##fnc[0]) snprintf(buf, BUF, "%s        .%s = %s,\n", buf, #fnc, proc_details.fops_##fnc);
 static int proc_procreadwrite_show (struct seq_file *m, void *v) {
-    size_t i, spacing;
-    char buf[BUF];
+    size_t spacing;
     char spacing_left[] = "                                                   ";
-    const char* padding = "                                                   ";
-    int pad = 45;
 
+    if(!proc_details.filename[0]) {
+        return -ENOENT;
+    }
+    
     spacing = (60 - strlen(proc_details.filename) - 6) / 2;
     if(spacing < 0 || spacing >= 60) {
         spacing = 0;
     }
     spacing_left[spacing] = 0;
 
-    snprintf(buf, BUF, "------------------------------------------------------------\n%s/proc/%s\n------------------------------------------------------------\n", spacing_left, proc_details.filename);
+    snprintf(buf, BUF, "------------------------------------------------------------\n%s/proc/%s"
+        "\n------------------------------------------------------------\n", spacing_left, proc_details.filename);
     
-    snprintf(buf, BUF, "%s> %s%*.*s : %s\n", buf, "Module ", pad - 8, pad - 8, padding, proc_details.modname); 
-    snprintf(buf, BUF, "%s> %s%*.*s\n", buf, "Mode "); 
-    snprintf(buf, BUF, "%s      %s%*.*s : %o\n", buf, "Format ", pad - 12, pad - 12, padding, (proc_details.dir_entry->mode & 0170000) / (8*8*8));
-    snprintf(buf, BUF, "%s      %s%*.*s : %o\n", buf, "Permissions ", pad - 17, pad - 17, padding, proc_details.dir_entry->mode & 0777);
-    snprintf(buf, BUF, "%s> %s%*.*s : %d\n", buf, "Count ", pad - 7, pad - 7, padding, proc_details.dir_entry->count); 
-    snprintf(buf, BUF, "%s> %s%*.*s : %d\n", buf, "In use ", pad - 8, pad - 8, padding, proc_details.dir_entry->in_use); 
+    snprintf(buf, BUF, "%s> %-42s : %s\n", buf, "Module ", proc_details.modname); 
+    snprintf(buf, BUF, "%s> %-42s\n", buf, "Mode "); 
+    snprintf(buf, BUF, "%s      %-38s : %o\n", buf, "Format ", (proc_details.dir_entry->mode & 0170000) / (8 * 8 * 8));
+    snprintf(buf, BUF, "%s      %-38s : %o\n", buf, "Permissions ", proc_details.dir_entry->mode & 0777);
+    snprintf(buf, BUF, "%s> %-42s : %zd\n", buf, "Count ", (size_t)(proc_details.dir_entry->count.counter)); 
+    snprintf(buf, BUF, "%s> %-42s : %zd\n", buf, "In use ", (size_t)(proc_details.dir_entry->in_use.counter)); 
     
-    snprintf(buf, BUF, "%s> %s%*.*s : %s\n", buf, "File Operations ", pad - 17, pad - 17, padding, proc_details.fops[0] ? "Yes" : "No");
+    snprintf(buf, BUF, "%s> %-42s : %s\n", buf, "File Operations ", proc_details.fops[0] ? "Yes" : "No");
     if(proc_details.fops[0]) {
         snprintf(buf, BUF, "%s    %s = {\n", buf, proc_details.fops);
         SHOW_FUNCTION(open)
@@ -88,6 +76,7 @@ static int proc_procreadwrite_show (struct seq_file *m, void *v) {
         SHOW_FUNCTION(llseek)
         snprintf(buf, BUF, "%s    };\n", buf);
     }
+    
     seq_puts(m, buf);
     return 0;
 }
@@ -139,18 +128,12 @@ static struct file_operations proc_procreadwrite_operations = {
 
 
 // ----------------------------------------------------------------------------------------------------------
-#define GET_FUNCTION(fnc) if(proc_details.dir_entry->proc_fops->fnc) {\
-            symbol_name((size_t)(proc_details.dir_entry->proc_fops->fnc), proc_details.fops_##fnc);\
-        } else {\
-            proc_details.fops_##fnc[0] = 0;\
-        }
-        
 static void get_details() {
     int rv;
-    unsigned int len;
-    unsigned long symbolsize, offset;
+    size_t len;
+    size_t symbolsize, offset;
     const char* fn = proc_details.filename;
-    char *tmpstr, *modname = NULL;
+    char *modname = NULL;
     char namebuf[128];
     
     spin_lock(subdir_lock);
@@ -166,11 +149,11 @@ static void get_details() {
     if(proc_details.dir_entry) {
         printk(KERN_INFO MOD "Name: %s, proc fops: %p\n", proc_details.dir_entry->name, proc_details.dir_entry->proc_fops);
         // get module name
-        tmpstr = syms_lookup((size_t)(proc_details.dir_entry->proc_fops), &symbolsize, &offset, &modname, namebuf);
+        (void)syms_lookup((size_t)(proc_details.dir_entry->proc_fops), &symbolsize, &offset, &modname, namebuf);
         if(modname) {
             strlcpy(proc_details.modname, modname, 128);
         } else {
-            strcpy(proc_details.modname, "N/A");
+            strcpy(proc_details.modname, "Kernel");
         }
         // get file operation struct name
         symbol_name((size_t)(proc_details.dir_entry->proc_fops), proc_details.fops);    
@@ -186,44 +169,48 @@ static void get_details() {
 
 
 // ----------------------------------------------------------------------------------------------------------
-static int __init procowner_init(void)
+static int __init procdetails_init(void)
 {
     printk(KERN_INFO MOD "module start\n");
-    int merr = 0;
 
     proc_create("procdetails", 0666, NULL, &proc_procreadwrite_operations);
         
-    xlate = kallsyms_lookup_name("__xlate_proc_name");   
+    xlate = (xlate_t)kallsyms_lookup_name("__xlate_proc_name");   
     if(!xlate) {
         printk(KERN_INFO MOD "__xlate_proc_name not found!\n");
-        return -ENODEV;
+        goto err;
     }
-    subdir_lock = kallsyms_lookup_name("proc_subdir_lock");
+    subdir_lock = (void*)kallsyms_lookup_name("proc_subdir_lock");
     if(!subdir_lock) {
         printk(KERN_INFO MOD "proc_subdir_lock not found!\n");
-        return -ENODEV;
+        goto err;
     }
-    subdir_find = kallsyms_lookup_name("pde_subdir_find");
+    subdir_find = (subdir_find_t)kallsyms_lookup_name("pde_subdir_find");
     if(!subdir_find) {
         printk(KERN_INFO MOD "pde_subdir_find not found!\n");
-        return -ENODEV;
+        goto err;
     }
-    syms_lookup = kallsyms_lookup_name("kallsyms_lookup");
+    syms_lookup = (syms_lookup_t)kallsyms_lookup_name("kallsyms_lookup");
     if(!syms_lookup) {
         printk(KERN_INFO MOD "kallsyms_lookup not found!\n");
-        return -ENODEV;
+        goto err;
     }
-    symbol_name = kallsyms_lookup_name("lookup_symbol_name");
+    symbol_name = (symbol_name_t)kallsyms_lookup_name("lookup_symbol_name");
     if(!symbol_name) {
         printk(KERN_INFO MOD "lookup_symbol_name not found!\n");
-        return -ENODEV;
+        goto err;
     }
     
     return 0;
+    
+err:
+    remove_proc_entry("procdetails", NULL);
+    return -ENODEV;
+
 }
 
 // ----------------------------------------------------------------------------------------------------------
-static void __exit procowner_exit(void)
+static void __exit procdetails_exit(void)
 {
     remove_proc_entry("procdetails", NULL);
         
@@ -231,6 +218,6 @@ static void __exit procowner_exit(void)
 }
 
 
-module_init(procowner_init);
-module_exit(procowner_exit);
+module_init(procdetails_init);
+module_exit(procdetails_exit);
 MODULE_LICENSE("GPL");

@@ -1,4 +1,4 @@
-MODULE_FILE := procowner.ko
+MODULE_FILE := procdetails.ko
 
 # Linux (default)
 X86_ARCH := x86
@@ -9,7 +9,7 @@ x86: KDIR := ${X86_KDIR}
 x86-clean : ARCH := $(X86_ARCH)
 
 # Kernel module
-obj-m := procowner.o
+obj-m := procdetails.o
 
 # Build targets
 all: x86
