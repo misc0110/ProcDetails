@@ -46,7 +46,7 @@ static int proc_procreadwrite_show (struct seq_file *m, void *v) {
     size_t spacing;
     char spacing_left[] = "                                                   ";
 
-    if(!proc_details.filename[0]) {
+    if(!proc_details.filename[0] || !proc_details.dir_entry) {
         return -ENOENT;
     }
     
@@ -60,12 +60,13 @@ static int proc_procreadwrite_show (struct seq_file *m, void *v) {
         "\n------------------------------------------------------------\n", spacing_left, proc_details.filename);
     
     snprintf(buf, BUF, "%s> %-42s : %s\n", buf, "Module ", proc_details.modname); 
-    snprintf(buf, BUF, "%s> %-42s\n", buf, "Mode "); 
-    snprintf(buf, BUF, "%s      %-38s : %o\n", buf, "Format ", (proc_details.dir_entry->mode & 0170000) / (8 * 8 * 8));
-    snprintf(buf, BUF, "%s      %-38s : %o\n", buf, "Permissions ", proc_details.dir_entry->mode & 0777);
-    snprintf(buf, BUF, "%s> %-42s : %zd\n", buf, "Count ", (size_t)(proc_details.dir_entry->count.counter)); 
-    snprintf(buf, BUF, "%s> %-42s : %zd\n", buf, "In use ", (size_t)(proc_details.dir_entry->in_use.counter)); 
-    
+    if(proc_details.dir_entry) {
+        snprintf(buf, BUF, "%s> %-42s\n", buf, "Mode "); 
+        snprintf(buf, BUF, "%s      %-38s : %o\n", buf, "Format ", (proc_details.dir_entry->mode & 0170000) / (8 * 8 * 8));
+        snprintf(buf, BUF, "%s      %-38s : %o\n", buf, "Permissions ", proc_details.dir_entry->mode & 0777);
+        snprintf(buf, BUF, "%s> %-42s : %zd\n", buf, "Count ", (size_t)(proc_details.dir_entry->count.counter)); 
+        snprintf(buf, BUF, "%s> %-42s : %zd\n", buf, "In use ", (size_t)(proc_details.dir_entry->in_use.counter)); 
+    }
     snprintf(buf, BUF, "%s> %-42s : %s\n", buf, "File Operations ", proc_details.fops[0] ? "Yes" : "No");
     if(proc_details.fops[0]) {
         snprintf(buf, BUF, "%s    %s = {\n", buf, proc_details.fops);
@@ -78,6 +79,7 @@ static int proc_procreadwrite_show (struct seq_file *m, void *v) {
     }
     
     seq_puts(m, buf);
+    proc_details.filename[0] = 0;
     return 0;
 }
 
@@ -136,6 +138,7 @@ static void get_details() {
     char *modname = NULL;
     char namebuf[128];
     
+    proc_details.dir_entry = NULL;
     spin_lock(subdir_lock);
     rv = xlate(proc_details.filename, &(proc_details.dir_entry), &fn);
     printk(KERN_INFO MOD "Ret: %d, Residual: %s\n", rv, fn);
