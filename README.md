@@ -13,7 +13,7 @@ The following other details are shown:
 
 ## Usage
 
-    sudo modprobe procdetails
+    sudo insmod procdetails
     ./procinfo /proc/cpuinfo
     ------------------------------------------------------------
 	                        /proc/cpuinfo
