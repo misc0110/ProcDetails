@@ -1,7 +1,7 @@
 # ProcDetails
-The ProcDetails kernel module shows informations about `procfs` files. 
+The ProcDetails kernel module shows details about `procfs` files. 
 If a proc file is associated with a kernel module, the name of the module is shown. Otherwise, the module can only show that the file is created by the kernel. 
-The following other informations are shown:
+The following other details are shown:
 
  * `Mode`: The permissions of the file:
  	* `Format`: Bitmask defined in `include/uapi/linux/stat.h`. Regular files are 100. 
